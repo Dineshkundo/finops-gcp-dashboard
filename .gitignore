@@ -1,3 +1,4 @@
 # Ignore secrets and keys
 keys/
 *.json
+.streamlit/secrets.toml
