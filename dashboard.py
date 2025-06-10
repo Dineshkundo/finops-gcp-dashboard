@@ -37,8 +37,8 @@ def query_billing_data():
             IFNULL(sku.description, 'Unknown') AS sku,
             usage_start_time,
             cost,
-            (SELECT SUM(credit.amount) FROM UNNEST(credits)) AS credits_usd,
-            cost - (SELECT SUM(credit.amount) FROM UNNEST(credits)) AS net_cost_usd,
+            (SELECT SUM(c.amount) FROM UNNEST(credits) AS c) AS credits_usd,
+            cost - (SELECT SUM(c.amount) FROM UNNEST(credits) AS c) AS net_cost_usd,
             _PARTITIONTIME AS partition_date
         FROM `{bq_table}`
         WHERE DATE(_PARTITIONTIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
