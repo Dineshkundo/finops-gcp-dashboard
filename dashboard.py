@@ -4,20 +4,18 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 # ---------- CONFIG ----------
-PROJECT_ID = "total-apparatus-460306-v7"
 DATASET = "billing_export_dataset"
 TABLE = "gcp_billing_export_v1_*"
-BQ_TABLE = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 
 # ---------- AUTH ----------
 @st.cache_resource
 def get_bq_client():
-    creds_dict = st.secrets["gcp_service_account"]  # Load from Streamlit secrets
+    creds_dict = dict(st.secrets["gcp_service_account"])  # ✅ Convert to dict
+    project_id = creds_dict["project_id"]
     credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    return bigquery.Client(credentials=credentials, project=PROJECT_ID)
+    return bigquery.Client(credentials=credentials, project=project_id)
 
 client = get_bq_client()
-
 
 # ---------- TEST CONNECTION ----------
 def test_bq_connection():
@@ -32,6 +30,8 @@ def test_bq_connection():
 # ---------- BILLING QUERY ----------
 @st.cache_data(ttl=600)
 def query_billing_data():
+    project_id = dict(st.secrets["gcp_service_account"])["project_id"]
+    bq_table = f"{project_id}.{DATASET}.{TABLE}"
     query = f"""
         SELECT
             IFNULL(project.name, 'Unknown') AS project,
@@ -40,11 +40,10 @@ def query_billing_data():
             usage_start_time,
             cost,
             _PARTITIONTIME AS partition_date
-        FROM `{BQ_TABLE}`
+        FROM `{bq_table}`
         WHERE DATE(_PARTITIONTIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
     """
     return client.query(query).to_dataframe()
-
 
 # ---------- UI ----------
 st.title("📊 GCP FinOps Dashboard")
