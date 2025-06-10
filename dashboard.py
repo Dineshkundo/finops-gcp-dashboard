@@ -3,12 +3,14 @@ import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-# ---------- CONFIG ----------
-DATASET = "billing_export_dataset"
-TABLE = "gcp_billing_export_v1_*"
-USD_TO_INR = 83.5  # ⚠️ You can update this value based on real-time rates
+# ----------------------------
+# 💱 Use actual invoice rate
+# ----------------------------
+USD_TO_INR = 85.0338  # From your invoice, May 2025
 
-# ---------- AUTH ----------
+# ----------------------------
+# 🔐 Auth via secrets.toml
+# ----------------------------
 @st.cache_resource
 def get_bq_client():
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -18,21 +20,16 @@ def get_bq_client():
 
 client = get_bq_client()
 
-# ---------- TEST CONNECTION ----------
-def test_bq_connection():
-    try:
-        query = "SELECT CURRENT_DATE() AS today"
-        result = client.query(query).result()
-        for row in result:
-            return f"✅ Connected to BigQuery! Today's date is {row.today}"
-    except Exception as e:
-        return f"❌ Failed to connect to BigQuery: {e}"
-
-# ---------- BILLING QUERY ----------
+# ----------------------------
+# 🔍 Billing Query
+# ----------------------------
 @st.cache_data(ttl=600)
 def query_billing_data():
     project_id = dict(st.secrets["gcp_service_account"])["project_id"]
-    bq_table = f"{project_id}.{DATASET}.{TABLE}"
+    dataset = "billing_export_dataset"
+    table = "gcp_billing_export_v1_*"
+    bq_table = f"{project_id}.{dataset}.{table}"
+
     query = f"""
         SELECT
             IFNULL(project.name, 'Unknown') AS project,
@@ -40,53 +37,62 @@ def query_billing_data():
             IFNULL(sku.description, 'Unknown') AS sku,
             usage_start_time,
             cost,
+            (SELECT SUM(credit.amount) FROM UNNEST(credits)) AS credits_usd,
+            cost - (SELECT SUM(credit.amount) FROM UNNEST(credits)) AS net_cost_usd,
             _PARTITIONTIME AS partition_date
         FROM `{bq_table}`
         WHERE DATE(_PARTITIONTIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
     """
     return client.query(query).to_dataframe()
 
-# ---------- UI ----------
-st.set_page_config(layout="wide")  # 📺 Make UI full-width
-st.title("📊 GCP FinOps Dashboard (INR ₹)")
+# ----------------------------
+# 🎨 Streamlit UI
+# ----------------------------
+st.set_page_config(page_title="GCP FinOps Dashboard", layout="wide")
+st.title("📊 GCP FinOps Dashboard (INR + Credits)")
 
-connection_status = test_bq_connection()
-if connection_status.startswith("❌"):
-    st.error(connection_status)
-else:
-    st.success(connection_status)
+try:
+    df = query_billing_data()
+    if df.empty:
+        st.warning("No billing data found for the last 30 days.")
+    else:
+        # 🧮 Calculations
+        df["date"] = pd.to_datetime(df["usage_start_time"]).dt.date
+        df["credits_usd"] = df["credits_usd"].fillna(0)
+        df["net_cost_usd"] = df["cost"] - df["credits_usd"]
+        df["cost_inr"] = df["cost"] * USD_TO_INR
+        df["credits_inr"] = df["credits_usd"] * USD_TO_INR
+        df["net_cost_inr"] = df["net_cost_usd"] * USD_TO_INR
 
-    try:
-        df = query_billing_data()
+        # 💰 KPIs
+        st.subheader("💰 30-Day Summary (INR)")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Cost (before credits)", f"₹{df['cost_inr'].sum():,.2f}")
+        col2.metric("Credits Used", f"-₹{df['credits_inr'].sum():,.2f}")
+        col3.metric("Net Cost", f"₹{df['net_cost_inr'].sum():,.2f}")
 
-        if df.empty:
-            st.warning("No billing data found for the last 30 days.")
-        else:
-            df["date"] = pd.to_datetime(df["usage_start_time"]).dt.date
-            df["cost_inr"] = df["cost"] * USD_TO_INR
+        # 📊 Charts
+        st.subheader("📁 Cost Breakdown by Project (INR)")
+        st.bar_chart(df.groupby("project")["net_cost_inr"].sum().sort_values(ascending=False))
 
-            # KPIs
-            st.subheader("💰 Total Cost (Last 30 Days)")
-            st.metric("Total (INR)", f"₹{df['cost_inr'].sum():,.2f}")
+        st.subheader("🧱 Cost Breakdown by Service (INR)")
+        st.bar_chart(df.groupby("service")["net_cost_inr"].sum().sort_values(ascending=False))
 
-            # Charts
-            col1, col2 = st.columns(2)
+        st.subheader("📈 Daily Spend Trend (Net INR)")
+        st.line_chart(df.groupby("date")["net_cost_inr"].sum())
 
-            with col1:
-                st.subheader("📁 Cost by Project")
-                st.bar_chart(df.groupby("project")["cost_inr"].sum().sort_values(ascending=False))
+        # 📋 Tabular view
+        st.subheader("🧾 Billing Data Table (INR)")
+        st.dataframe(
+            df[["date", "project", "service", "sku", "cost_inr", "credits_inr", "net_cost_inr"]]
+            .sort_values(by="date", ascending=False)
+            .rename(columns={
+                "cost_inr": "Cost (INR)",
+                "credits_inr": "Credits (INR)",
+                "net_cost_inr": "Net Cost (INR)"
+            })
+        )
 
-            with col2:
-                st.subheader("🧱 Cost by Service")
-                st.bar_chart(df.groupby("service")["cost_inr"].sum().sort_values(ascending=False))
-
-            st.subheader("📈 Daily Spend Trend")
-            st.line_chart(df.groupby("date")["cost_inr"].sum())
-
-            st.subheader("🧾 Billing Data Table")
-            st.dataframe(df[["project", "service", "sku", "date", "cost_inr"]].sort_values(by="date", ascending=False).rename(columns={"cost_inr": "cost (INR ₹)"}))
-
-            st.caption("💡 Costs shown in INR (₹). Exchange rate: 1 USD = ₹83.5. Powered by BigQuery + Streamlit 🚀")
-
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.caption("Powered by GCP BigQuery + Streamlit 💡")
+except Exception as e:
+    st.error(f"❌ Error: {e}")
