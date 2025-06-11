@@ -1,4 +1,5 @@
 import streamlit as st
+st.set_page_config(page_title="GCP FinOps Dashboard", layout="wide")
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -48,7 +49,6 @@ def query_billing_data():
 # ----------------------------
 # 🎨 Streamlit UI
 # ----------------------------
-st.set_page_config(page_title="GCP FinOps Dashboard", layout="wide")
 st.title("📊 GCP FinOps Dashboard (INR + Credits)")
 
 try:
