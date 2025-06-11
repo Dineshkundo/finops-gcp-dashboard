@@ -1,98 +1,57 @@
 import streamlit as st
-st.set_page_config(page_title="GCP FinOps Dashboard", layout="wide")
-import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
+import pandas as pd
+import plotly.express as px
+from datetime import datetime, timedelta
 
-# ----------------------------
-# 💱 Use actual invoice rate
-# ----------------------------
-USD_TO_INR = 85.0338  # From your invoice, May 2025
+# 📍 Page config (must be first Streamlit command)
+st.set_page_config(page_title="GCP FinOps Dashboard", layout="wide")
 
-# ----------------------------
-# 🔐 Auth via secrets.toml
-# ----------------------------
-@st.cache_resource
-def get_bq_client():
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    project_id = creds_dict["project_id"]
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    return bigquery.Client(credentials=credentials, project=project_id)
+# 🔐 Load credentials from secrets
+credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+client = bigquery.Client(credentials=credentials, project=credentials.project_id)
 
-client = get_bq_client()
+# 📅 Filter options
+st.sidebar.header("Filter Options")
+days = st.sidebar.slider("Days of data to show", 1, 90, 30)
+start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-# ----------------------------
-# 🔍 Billing Query
-# ----------------------------
-@st.cache_data(ttl=600)
-def query_billing_data():
-    project_id = dict(st.secrets["gcp_service_account"])["project_id"]
-    dataset = "billing_export_dataset"
-    table = "gcp_billing_export_v1_*"
-    bq_table = f"{project_id}.{dataset}.{table}"
-
+# 🧾 Query billing data
+@st.cache_data(ttl=3600)
+def load_data():
     query = f"""
-        SELECT
-            IFNULL(project.name, 'Unknown') AS project,
-            IFNULL(service.description, 'Unknown') AS service,
-            IFNULL(sku.description, 'Unknown') AS sku,
-            usage_start_time,
-            cost,
-            (SELECT SUM(c.amount) FROM UNNEST(credits) AS c) AS credits_usd,
-            cost - (SELECT SUM(c.amount) FROM UNNEST(credits) AS c) AS net_cost_usd,
-            _PARTITIONTIME AS partition_date
-        FROM `{bq_table}`
-        WHERE DATE(_PARTITIONTIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+    SELECT
+      project.id AS project_id,
+      service.description AS service,
+      sku.description AS sku,
+      usage_start_time,
+      cost
+    FROM `total-apparatus-460306-v7.billing_dataset.gcp_billing_export_v1_*`
+    WHERE _PARTITIONTIME >= TIMESTAMP("{start_date}")
+      AND cost > 0
     """
     return client.query(query).to_dataframe()
 
-# ----------------------------
-# 🎨 Streamlit UI
-# ----------------------------
-st.title("📊 GCP FinOps Dashboard (INR + Credits)")
+df = load_data()
 
-try:
-    df = query_billing_data()
-    if df.empty:
-        st.warning("No billing data found for the last 30 days.")
-    else:
-        # 🧮 Calculations
-        df["date"] = pd.to_datetime(df["usage_start_time"]).dt.date
-        df["credits_usd"] = df["credits_usd"].fillna(0)
-        df["net_cost_usd"] = df["cost"] - df["credits_usd"]
-        df["cost_inr"] = df["cost"] * USD_TO_INR
-        df["credits_inr"] = df["credits_usd"] * USD_TO_INR
-        df["net_cost_inr"] = df["net_cost_usd"] * USD_TO_INR
+# 🎯 KPIs
+st.title("📊 GCP FinOps Dashboard")
+col1, col2 = st.columns(2)
+col1.metric("Total Spend (₹)", f"{df['cost'].sum():,.2f}")
+col2.metric("Avg Daily Spend (₹)", f"{df.groupby(df['usage_start_time'].dt.date)['cost'].sum().mean():,.2f}")
 
-        # 💰 KPIs
-        st.subheader("💰 30-Day Summary (INR)")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Cost (before credits)", f"₹{df['cost_inr'].sum():,.2f}")
-        col2.metric("Credits Used", f"-₹{df['credits_inr'].sum():,.2f}")
-        col3.metric("Net Cost", f"₹{df['net_cost_inr'].sum():,.2f}")
+# 📉 Line Chart: Cost over time
+df['date'] = pd.to_datetime(df['usage_start_time']).dt.date
+daily_cost = df.groupby('date')['cost'].sum().reset_index()
+st.subheader("💹 Daily GCP Spend")
+st.plotly_chart(px.line(daily_cost, x='date', y='cost', title="Cost Trend"))
 
-        # 📊 Charts
-        st.subheader("📁 Cost Breakdown by Project (INR)")
-        st.bar_chart(df.groupby("project")["net_cost_inr"].sum().sort_values(ascending=False))
+# 🧩 Breakdown by Project
+proj_cost = df.groupby('project_id')['cost'].sum().reset_index()
+st.subheader("📁 Cost by Project")
+st.plotly_chart(px.pie(proj_cost, names='project_id', values='cost', title="Project-wise Spend"))
 
-        st.subheader("🧱 Cost Breakdown by Service (INR)")
-        st.bar_chart(df.groupby("service")["net_cost_inr"].sum().sort_values(ascending=False))
-
-        st.subheader("📈 Daily Spend Trend (Net INR)")
-        st.line_chart(df.groupby("date")["net_cost_inr"].sum())
-
-        # 📋 Tabular view
-        st.subheader("🧾 Billing Data Table (INR)")
-        st.dataframe(
-            df[["date", "project", "service", "sku", "cost_inr", "credits_inr", "net_cost_inr"]]
-            .sort_values(by="date", ascending=False)
-            .rename(columns={
-                "cost_inr": "Cost (INR)",
-                "credits_inr": "Credits (INR)",
-                "net_cost_inr": "Net Cost (INR)"
-            })
-        )
-
-        st.caption("Powered by GCP BigQuery + Streamlit 💡")
-except Exception as e:
-    st.error(f"❌ Error: {e}")
+# 🔎 Optional: Table View
+with st.expander("🔍 Raw Billing Data"):
+    st.dataframe(df.head(100))
